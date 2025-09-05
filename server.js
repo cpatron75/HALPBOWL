@@ -1,10 +1,10 @@
-// server.js — HALPBOWL (hardened + diagnostics)
+// server.js — HALPBOWL donation tracker (hardcoded Helio secret)
 // Routes:
-//   GET  /              -> redirects to /helio-widget
-//   GET  /selftest      -> JSON health incl. totals + env
-//   GET  /helio-widget  -> full fishbowl widget page (iframe target; supports ?goal=&currency=&bean=)
-//   GET  /helio/total   -> { total, currency }
-//   POST /helio/webhook -> Helio webhook (idempotent)
+//   GET  /               -> redirects to /helio-widget
+//   GET  /selftest       -> JSON health
+//   GET  /helio-widget   -> fishbowl page for <iframe> (supports ?goal=&currency=&bean=)
+//   GET  /helio/total    -> { total, currency }
+//   POST /helio/webhook  -> Helio webhook (idempotent)
 
 const express = require("express");
 const cors = require("cors");
@@ -12,11 +12,12 @@ const crypto = require("crypto");
 
 const app = express();
 
-// ===== Config =====
+// ===== Config (hardcoded secret per your request) =====
 const PORT = process.env.PORT || 3000;
 const CURRENCY = (process.env.CURRENCY || "USD").toUpperCase();
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
-const HELIO_WEBHOOK_SECRET = process.env.HELIO_WEBHOOK_SECRET || "";
+const HELIO_WEBHOOK_SECRET =
+  "qdetoHxs/rsXz3iKDo6Do9+QxV0h2xfjNTgYRJUkeosk+yx9VxAu4z7G1rfAndTcYb71oPzG5DlVg7+NGvzwAwtvvymyGlkpZl0H9r2wDbtEydUXT7/rutty4P0NYeWL";
 
 // ===== In-memory store =====
 let total = 0;
@@ -25,8 +26,6 @@ let seenTx = new Set();
 // ===== Middleware =====
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 app.use(cors({ origin: CORS_ORIGIN }));
-
-// Strict-ish defaults for HTML
 app.use((_req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "no-referrer");
@@ -39,26 +38,25 @@ function safeGet(obj, keys, fallback) {
   return fallback;
 }
 function verifySignature(req) {
-  if (!HELIO_WEBHOOK_SECRET) return true;
+  // Require a signature since you provided a secret
   const sigHeader = req.get("x-helio-signature") || req.get("X-Helio-Signature");
   if (!sigHeader) return false;
-  const expected = crypto.createHmac("sha256", HELIO_WEBHOOK_SECRET).update(req.rawBody).digest("hex");
+  const expected = crypto.createHmac("sha256", HELIO_WEBHOOK_SECRET)
+    .update(req.rawBody)
+    .digest("hex");
   const given = sigHeader.startsWith("sha256=") ? sigHeader.slice(7) : sigHeader;
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(given));
+  try {
+    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(given));
+  } catch {
+    return false;
+  }
 }
 
 // ===== Diagnostics =====
 app.get("/", (_req, res) => res.redirect(302, "/helio-widget"));
-
 app.get("/selftest", (_req, res) => {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.json({
-    ok: true,
-    total,
-    currency: CURRENCY,
-    hasSecret: Boolean(HELIO_WEBHOOK_SECRET),
-    corsOrigin: CORS_ORIGIN
-  });
+  res.json({ ok: true, total, currency: CURRENCY, corsOrigin: CORS_ORIGIN, hasSecret: true });
 });
 
 // ===== API =====
@@ -85,16 +83,17 @@ app.post("/helio/webhook", (req, res) => {
 });
 
 // ===== Widget page (iframe target) =====
+// Query params: goal, currency, bean (URL to bean image; mix with vector beans)
 app.get("/helio-widget", (req, res) => {
   const origin = `${req.protocol}://${req.get("host")}`;
   const backendURL = `${origin}/helio/total`;
-
-  // Query params
   const url = new URL(req.originalUrl, origin);
+
   const GOAL = Number(url.searchParams.get("goal") || 50000);
   const CURRENCY_Q = url.searchParams.get("currency");
   const CURRENCY_FINAL = (CURRENCY_Q || CURRENCY || "USD").toUpperCase();
   const BEAN_IMG = url.searchParams.get("bean") || "";
+
   const PAGE = `<!doctype html>
 <html lang="en">
 <head>
@@ -268,7 +267,6 @@ app.get("/helio-widget", (req, res) => {
 </script>
 </body>
 </html>`;
-
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.end(PAGE);
 });
