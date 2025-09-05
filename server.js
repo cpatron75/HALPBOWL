@@ -1,9 +1,10 @@
-// server.js — HALPhodl Helio donation tracker (standalone)
+// server.js — HALPBOWL (hardened + diagnostics)
 // Routes:
-//   GET  /helio-widget  -> full fishbowl page for <iframe> (supports ?goal=&currency=&bean=)
+//   GET  /              -> redirects to /helio-widget
+//   GET  /selftest      -> JSON health incl. totals + env
+//   GET  /helio-widget  -> full fishbowl widget page (iframe target; supports ?goal=&currency=&bean=)
 //   GET  /helio/total   -> { total, currency }
 //   POST /helio/webhook -> Helio webhook (idempotent)
-// Minimal: in-memory total (upgrade to DB later if you want).
 
 const express = require("express");
 const cors = require("cors");
@@ -13,18 +14,24 @@ const app = express();
 
 // ===== Config =====
 const PORT = process.env.PORT || 3000;
-const CURRENCY = process.env.CURRENCY || "USD";
-// iframe is read-only; you can lock to your domain later if you prefer
+const CURRENCY = (process.env.CURRENCY || "USD").toUpperCase();
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 const HELIO_WEBHOOK_SECRET = process.env.HELIO_WEBHOOK_SECRET || "";
 
-// ===== In-memory state (resets on restart) =====
+// ===== In-memory store =====
 let total = 0;
 let seenTx = new Set();
 
 // ===== Middleware =====
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 app.use(cors({ origin: CORS_ORIGIN }));
+
+// Strict-ish defaults for HTML
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  next();
+});
 
 // ===== Helpers =====
 function safeGet(obj, keys, fallback) {
@@ -40,11 +47,24 @@ function verifySignature(req) {
   return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(given));
 }
 
-// ===== API =====
-app.get("/healthz", (_req, res) => res.send("ok"));
+// ===== Diagnostics =====
+app.get("/", (_req, res) => res.redirect(302, "/helio-widget"));
 
+app.get("/selftest", (_req, res) => {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.json({
+    ok: true,
+    total,
+    currency: CURRENCY,
+    hasSecret: Boolean(HELIO_WEBHOOK_SECRET),
+    corsOrigin: CORS_ORIGIN
+  });
+});
+
+// ===== API =====
 app.get("/helio/total", (_req, res) => {
-  res.json({ total, currency: CURRENCY });
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.end(JSON.stringify({ total, currency: CURRENCY }));
 });
 
 app.post("/helio/webhook", (req, res) => {
@@ -60,32 +80,27 @@ app.post("/helio/webhook", (req, res) => {
     res.sendStatus(200);
   } catch (e) {
     console.error("Webhook error:", e);
-    res.sendStatus(200); // avoid retry storms
+    res.sendStatus(200);
   }
 });
 
-// ===== Widget page (iframe) =====
-// Supports query params:
-//   goal     -> number (default 50000)
-//   currency -> string (default ENV CURRENCY or USD)
-//   bean     -> URL to a small bean texture image (optional)
+// ===== Widget page (iframe target) =====
 app.get("/helio-widget", (req, res) => {
   const origin = `${req.protocol}://${req.get("host")}`;
   const backendURL = `${origin}/helio/total`;
 
-  // Read query params
+  // Query params
   const url = new URL(req.originalUrl, origin);
   const GOAL = Number(url.searchParams.get("goal") || 50000);
   const CURRENCY_Q = url.searchParams.get("currency");
   const CURRENCY_FINAL = (CURRENCY_Q || CURRENCY || "USD").toUpperCase();
-  const BEAN_IMG = url.searchParams.get("bean") || ""; // if provided, we mix texture beans
-
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.end(`<!doctype html>
+  const BEAN_IMG = url.searchParams.get("bean") || "";
+  const PAGE = `<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta charset="utf-8">
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>HALPhodl — Helio Donations</title>
 <style>
   :root{ --navy:#0c1730; --navy-2:#0f1d3f; --gold:#ff9d2e; --gold-2:#ffb54f;
@@ -162,7 +177,7 @@ app.get("/helio-widget", (req, res) => {
   const BACKEND_URL = root.getAttribute('data-backend');
   const GOAL = parseFloat(root.getAttribute('data-goal') || '50000');
   const CURRENCY = (root.getAttribute('data-currency') || 'USD').toUpperCase();
-  const BEAN_URL = root.getAttribute('data-bean') || ""; // if provided, mix textured beans
+  const BEAN_URL = root.getAttribute('data-bean') || "";
   const POLL_MS = 30000;
 
   const elTotal = root.querySelector('#hx-total');
@@ -186,11 +201,9 @@ app.get("/helio-widget", (req, res) => {
   sizeCanvas(); addEventListener('resize', sizeCanvas);
   const ctx = canvas.getContext('2d');
 
-  // Bean texture image (optional)
   const beanImg = new Image();
   if (BEAN_URL) beanImg.src = BEAN_URL;
 
-  // Particles
   let beans = [];
   function spawnBeans(count, targetPct){
     for(let i=0;i<count;i++){
@@ -199,7 +212,7 @@ app.get("/helio-widget", (req, res) => {
         x:Math.random()*w, y:-20-Math.random()*40,
         vy:1.5+Math.random()*2.5, rot:Math.random()*Math.PI*2, vr:(Math.random()-.5)*0.08,
         size, targetStopY:h-(h*(targetPct/100))-(Math.random()*8),
-        useImage: !!BEAN_URL && Math.random() < 0.6 // ~60% textured beans if provided
+        useImage: !!BEAN_URL && Math.random() < 0.6
       });
     }
   }
@@ -254,8 +267,11 @@ app.get("/helio-widget", (req, res) => {
 })();
 </script>
 </body>
-</html>`);
+</html>`;
+
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.end(PAGE);
 });
 
 // ===== Start =====
-app.listen(PORT, () => console.log("HALPhodl Helio tracker on :" + PORT));
+app.listen(PORT, () => console.log("HALPBOWL running on :" + PORT));
