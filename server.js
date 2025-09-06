@@ -4,7 +4,7 @@
 //   GET  /selftest       -> JSON health
 //   GET  /helio-widget   -> fishbowl page for <iframe> (supports ?goal=&currency=&bean=)
 //   GET  /helio/total    -> { total, currency }
-//   POST /helio/webhook  -> Helio webhook (idempotent)
+//   POST /helio/webhook  -> Helio webhook (requires valid signature)
 
 const express = require("express");
 const cors = require("cors");
@@ -12,14 +12,15 @@ const crypto = require("crypto");
 
 const app = express();
 
-// ===== Config (hardcoded secret per your request) =====
+// ===== Config =====
 const PORT = process.env.PORT || 3000;
 const CURRENCY = (process.env.CURRENCY || "USD").toUpperCase();
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
+// *** Your new Helio webhook secret (hardcoded per your request) ***
 const HELIO_WEBHOOK_SECRET =
-  "qdetoHxs/rsXz3iKDo6Do9+QxV0h2xfjNTgYRJUkeosk+yx9VxAu4z7G1rfAndTcYb71oPzG5DlVg7+NGvzwAwtvvymyGlkpZl0H9r2wDbtEydUXT7/rutty4P0NYeWL";
+  "EDRZkJXqJs+NaMq1gO2D0M7En8Xf5b49LJ8dQ2AQCkVSe5rQJFrT6dohBlsBbl8ZRdptUwFAx7vXkkxEL0pjj+jAyTP8QUyqkRzkWQlnSBYnNLUof+yMiruTkh8Qn5XK";
 
-// ===== In-memory store =====
+// ===== In-memory store (resets on redeploy) =====
 let total = 0;
 let seenTx = new Set();
 
@@ -38,7 +39,7 @@ function safeGet(obj, keys, fallback) {
   return fallback;
 }
 function verifySignature(req) {
-  // Require a signature since you provided a secret
+  // Require a signature since we're hardcoding a secret
   const sigHeader = req.get("x-helio-signature") || req.get("X-Helio-Signature");
   if (!sigHeader) return false;
   const expected = crypto.createHmac("sha256", HELIO_WEBHOOK_SECRET)
@@ -83,7 +84,7 @@ app.post("/helio/webhook", (req, res) => {
 });
 
 // ===== Widget page (iframe target) =====
-// Query params: goal, currency, bean (URL to bean image; mix with vector beans)
+// Query params: goal, currency, bean (URL to bean image; mixed with vector beans)
 app.get("/helio-widget", (req, res) => {
   const origin = `${req.protocol}://${req.get("host")}`;
   const backendURL = `${origin}/helio/total`;
